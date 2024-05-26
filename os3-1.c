@@ -30,16 +30,17 @@ typedef struct {
   unsigned char b[PAGESIZE];
 } frame; // 32 / 4 = 8pte
 
-// =====================================================================================
 
 #define TRUE 1
 #define FALSE 0
 #define NUM_MAX_PROC 10
 
-// 원형 큐
-// 출처: https://devpluto.tistory.com/
+// ###################################################
+// # 원형 큐                         
+// # 출처: https://devpluto.tistory.com/    
+// ###################################################
 typedef struct {
-  int data[NUM_MAX_PROC];
+  int data[NUM_MAX_PROC+2];
   int front, rear;
 } queue;
 void init(queue *q) { q->rear = q->front = -1; }
@@ -64,59 +65,76 @@ int dequeue(queue *q) {
   }
 }
 
-// =======================================================================================
-
+// ###################################################
+// # 시뮬레이터를 위한 구조체 및 프레임 할당/엔트리 추출 함수
+// ###################################################
 typedef struct {
   int pid;
   int ref_len;
-} process_info; // 읽기 전용 프로세스 정보 구조체
+} process_info; // 이진파일 읽기 전용 프로세스 정보 구조체
 
+// 실제 시뮬레이션에서 필요한 정보를 포함한 프로세스 구조체
 typedef struct {
   int pid;
   int ref_len; // Less than 255
   unsigned char *references;
   int ref_index;  // references 순회를 위한 index
   int table_addr; // 테이블이 있는 물리주소
-  int num_alloc;  // 통계용
-  int num_ref;
-  int num_fault;
+
+  // 단순 출력을 위한 멤버
+  int num_alloc;  // 할당된 프레임 갯수
+  int num_ref;  // 참조한 횟수
+  int num_fault; // 페이지 폴트가 발생한 횟수
 } process;
 
 process proc_arr[NUM_MAX_PROC]; // 조건에서 PID<10
 frame *pas;
 int num_proc;       // 입력으로 부터 읽은 프로세스 갯수
-int free_frame = 0; // 할당 가능한 프레임
-queue proc_queue;   // 시뮬레이션 구현을 위한 큐
-int oom_flag = FALSE;
+int free_frame = 0; // 할당 대기중인 다음 프레임 번호
+queue proc_queue;   // 라운드 로빈 형태의 프로세스 처리를 구현
+int oom_flag = FALSE; // 메모리 초과 여부
 
+// num_frame만큼 물리 메모리에서 프레임을 할당하고, 
+// 할당된 프레임의 시작 주소(기준 프레임)를 반환하는 함수.
+// 만약 할당 가능한 프레임이 부족하면 -1을 반환한다.
 int get_free_frame(int pid, int num_frame) {
   process *proc = &proc_arr[pid];
+
+  // 물리 메모리 초과
   if (free_frame >= PAS_FRAMES) {
     return -1;
   }
+  
+  // 할당할 길이만큼 다음 시작 주소로 업데이트하고, 기존 시작주소를 반환함으로써
+  // num_frame크기만큼의 공간을 확보한다.
   int base_frame = free_frame;
   proc->num_alloc += num_frame;
   free_frame += num_frame;
   return base_frame;
 }
 
+// 주어진 테이블 주소와 페이지 번호를 기반으로 
+// 페이지 테이블 엔트리(pte)를 반환하는 함수.
 pte *get_pte(int table_addr, int page) {
-  // int pte_addr = table_addr + page;
-  // return (pte *)&pas[pte_addr];
-  // printf("get_pte: %d %d\n", table_addr, page);
-  int page_table_page = page / PAGETABLE_FRAMES;
-  int entry_index = page % PAGETABLE_FRAMES;
+  int page_table_page = page / PAGETABLE_FRAMES; // 8개의 consecutive 프레임중 특정 테이블 프레임
+  int entry_index = page % PAGETABLE_FRAMES; // 특정 테이블 프레임에서의 entry
 
+  // 특정 테이블의 물리주소
   int frame_number = table_addr + page_table_page;
 
+  // 계산된 프레임 번호에서 프레임 가져오기
   frame *page_frame = &pas[frame_number];
-  pte *pte_arr = (pte *)page_frame; // 크기 8의 pte array;
+  // 프레임을 pte 배열로 캐스팅 (크기 8의 pte array)
+  pte *pte_arr = (pte *)page_frame;
 
   return &pte_arr[entry_index];
 }
 
-// =======================================================================================
-
+// ###################################################
+// # 출력을 위한 보고서 함수(helper function)
+// ###################################################
+// 각 프로세스의 시뮬레이션 결과를 출력
+// 프로세스 ID, 할당된 프레임 수, 페이지 폴트 수, 참조 수를 출력한다.
 void print_process(int pid) {
   process *proc = &proc_arr[pid];
   printf("** Process %03d: Allocated Frames=%03d "
@@ -124,6 +142,8 @@ void print_process(int pid) {
          pid, proc->num_alloc, proc->num_fault, proc->num_ref);
 }
 
+// 주어진 프로세스의 페이지 테이블 정보를 출력하는 함수.
+// 프로세스의 페이지 테이블을 순회하면서 유효한 페이지 엔트리(pte)의 프레임과 참조 수를 출력한다.
 void print_table(int pid) {
   process *proc = &proc_arr[pid];
   int table = proc->table_addr;
@@ -131,6 +151,7 @@ void print_table(int pid) {
   for (int page = 0; page < VAS_PAGES; page++) {
     pte *entry = get_pte(table, page);
 
+    // pte가 invalid한 경우 무시
     if (entry->vflag == PAGE_INVALID)
       continue;
 
@@ -138,6 +159,8 @@ void print_table(int pid) {
   }
 }
 
+// 전체 시스템의 통계 정보를 출력
+// 모든 프로세스의 할당된 프레임 수, 페이지 폴트 수, 참조 수를 누적하여 출력한다.
 void print_stat() {
   int allocated_frames = 0;
   int page_faults = 0;
@@ -155,6 +178,7 @@ void print_stat() {
          allocated_frames, page_faults, references);
 }
 
+// 시뮬레이션 종료 이후, 각 프로세스의 시뮬레이션 결과 및 테이블 정보와 전체 통계 정보를 출력한다.
 void print_report() {
   if (oom_flag) {
     printf("Out of memory!!\n");
@@ -167,8 +191,12 @@ void print_report() {
 
   print_stat();
 }
-// =======================================================================================
 
+// ###################################################
+// # 시뮬레이션을 위한 함수
+// ###################################################
+// 페이지 테이블을 초기화하는 함수.
+// 주어진 페이지 테이블 주소에 대해 모든 페이지 항목을 INVALID로 설정하고 참조 횟수를 0으로 설정한다.
 void init_page_table(int table_addr) {
   for (int page = 0; page < VAS_PAGES; page++) {
     pte *entry = get_pte(table_addr, page);
@@ -177,7 +205,9 @@ void init_page_table(int table_addr) {
   }
 }
 
-// 이진파일에서 프로세스를 읽고 저장한 후 프로세스 갯수 반환
+
+//이진 파일로부터 프로세스 정보를 읽어들여 배열에 저장하고,
+//각 프로세스에 대해 페이지 테이블을 할당하고 초기화한 후, 프로세스 대기열에 추가
 int load_process() {
   int pid = 0;
 
@@ -217,22 +247,12 @@ int load_process() {
   return pid;
 }
 
-void print_process_test(int num_proc) {
-  for (int i = 0; i < num_proc; i++) {
-    process *cur_proc = &proc_arr[i];
-    printf("%d %d\n", cur_proc->pid, cur_proc->ref_len);
-
-    for (int j = 0; j < cur_proc->ref_len; j++) {
-      printf("%d ", cur_proc->references[j]);
-    }
-    printf("\n");
-  }
-}
-
+// 프로세스가 종료되었는지 확인하는 함수.
+// 참조 인덱스가 참조 길이를 초과했는지 확인한다.
 int is_terminated(process *proc) { return proc->ref_index >= proc->ref_len; }
 
 void runner() {
-  // 프로세스가 번갈아가면서 페이지 참조
+  // 큐를 활용하여 각 프로세스를 라운드 로빈으로 처리함
   while (!is_empty(&proc_queue)) {
     int pid = dequeue(&proc_queue);
     process *proc = &proc_arr[pid];
@@ -241,11 +261,12 @@ void runner() {
       continue;
     }
 
+    // 현재 프로세스의 참조할 페이지 확인
     int ref_index = proc->ref_index;
     int page = proc->references[ref_index];
     pte *entry = get_pte(proc->table_addr, page);
 
-    // page fault 처리
+    // page fault가 발생한경우 프레임을 하나 할당받는다.
     if (entry->vflag == PAGE_INVALID) {
 
       int frame = get_free_frame(pid, 1);
@@ -261,19 +282,21 @@ void runner() {
 
     // printf("%d %d %d\n", pid, page, entry->frame);
 
-    // reference
+    // 참조 변수 갱신
     proc->ref_index++;
 
     entry->ref++;
     proc->num_ref++;
 
-    // 다음 큐에 처리
+    // 라운드 로빈에 의해 큐의 맨끝으로 이동    
     enqueue(&proc_queue, pid);
   }
 
   return;
 }
 
+// 동적으로 할당된 메모리를 해제하는 함수.
+// 페이지 테이블과 프로세스 참조 배열을 포함하여 모든 동적 메모리를 해제한다.
 void deallocate() {
   // pas 동적해제
   free(pas);
@@ -286,8 +309,9 @@ void deallocate() {
 }
 
 int main() {
-  init(&proc_queue);
   pas = (frame *)malloc(PAS_SIZE); // PAS_SIZE=32*256
+  
+  init(&proc_queue);
 
   num_proc = load_process();
   if (oom_flag) {
@@ -298,34 +322,7 @@ int main() {
   runner();
   print_report();
 
-  // 할일: 전부다 동적 해제
-
   deallocate();
 
   return 0;
 }
-
-// 자율진도표: 매크로 코드 이해
-
-// pas 할당, pas 타입?
-// pas는 frame으로 이루어진 공간이네용
-// 총 256개의 프레임에서 프로세스마다 각 8개의 프레임을 페이지테이블로 활용
-// reference는 logical adress space의 page번호를 말하는거겠죠?
-
-// 페이지테이블은 총 64개 엔트리, 즉 64개의 페이지(프레임) 정보를 포함할 수 있음
-// 프로세스가 참조하는 페이지는 64이하, 0~63까지만
-// 한 페이지테이블에 프로세스가 참조하는 모든 페이지를 넣을 수 있음
-
-// 각 프로세스 자체는 어디에 할당?
-// 없으면 page fault를 띄우고 필요할때 할당->즉시즉시할당
-
-// 프레임 번호 == pas index
-
-// pas(frame배열)에다가 연속적으로 pagetable할당
-// pas에서 8*pid 부터 8*pid+7까지 페이지테이블 범위
-// 0~7: 프로세스0 페이지 테이블
-// 8~15: 프로세스1 페이지 테이블
-
-// pas에서 할당가능한 프레임번호 freeframe number 가지고있는게 좋겟네.
-
-// 대기열도 필요하다...
